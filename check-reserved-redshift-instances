@@ -1,0 +1,90 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import boto3
+import smtplib
+from email.MIMEMultipart import MIMEMultipart
+from email.MIMEBase import MIMEBase
+from email.MIMEText import MIMEText
+from email import Encoders
+import datetime
+import time
+import logging
+import botocore
+
+#EC2 connection beginning
+#setup simple logging for INFO
+# #ec = boto3.client('ec2')
+#logger = logging.getLogger()
+#S3 connection beginning
+#logger.setLevel(logging.INFO)
+#s3 = boto3.resource('s3')
+
+
+#print('Loading function')
+# regions = ec.describe_regions().get('Regions',[] )
+# for region in regions:
+#     reg=region['RegionName']
+#     regname='REGION :' + reg
+    # RedShift Connection beginning
+conn = boto3.client('redshift', region_name='us-east-1')
+
+# boto3 library RedShift API describe cluster page
+# http://boto3.readthedocs.io/en/latest/reference/services/redshift.html#Redshift.Client.describe_clusters
+running = conn.describe_clusters().get(
+    'Clusters', []
+)
+running_instances = {}
+reserved_instances = {}
+soon_expire_ri = {}
+for cluster in running:
+    running_instances[(cluster['NodeType'])] = running_instances.get((cluster['NodeType']), 0) + cluster['NumberOfNodes']
+
+reserved = conn.describe_reserved_nodes().get(
+    'ReservedNodes', []
+)
+for node in reserved:
+    if node['State'] == 'active':
+        reserved_instances[(node['NodeType'])] = reserved_instances.get((node['NodeType']), 0) + node['NodeCount']
+        ri_start_time = node['StartTime']
+        ri_start_time = ri_start_time.replace(tzinfo=None)
+
+        ri_duration = node['Duration']
+        expire_time = time.mktime(ri_start_time.timetuple()) + ri_duration
+        if (expire_time - time.time()) < 120 * 86400:
+            soon_expire_ri[node['ReservedNodeId']] = (node['NodeType'], node['NodeCount'], expire_time)
+
+
+diff = dict([(x, reserved_instances[x] - running_instances.get(x, 0)) for x in reserved_instances])
+
+for pkey in running_instances:
+    if pkey not in reserved_instances:
+        diff[pkey] = -running_instances[pkey]
+
+unused_ri = dict((k, v) for k, v in diff.iteritems() if v > 0)
+
+unreserved_instances = dict((k,-v) for k, v in diff.iteritems() if v < 0)
+
+print("Reserved Instances:")
+for k, v in reserved_instances.iteritems():
+    print("\t(%s)\t%s" %(int(v), k))
+
+print("")
+
+print("Expiring soon (less than 120d) reserved instances:")
+for k, v in soon_expire_ri.iteritems():
+        print("\t%s\t%s\t%s\t%s" %(k, v[0], v[1], datetime.datetime.fromtimestamp(v[2]).strftime('%Y-%m-%d')))
+if not soon_expire_ri:
+        print("\tNone")
+print("")
+
+print("On-demand instances, which haven't got a reserved instance:")
+for k, v in unreserved_instances.iteritems():
+    print("\t(%s)\t%s" %(v, k))
+if not unreserved_instances:
+    print("\tNone")
+print("")
+
+print("Running on-demand instances:   %s" % sum(running_instances.values()))
+print("Reserved instances:            %s" % sum(reserved_instances.values()))
+print("")
